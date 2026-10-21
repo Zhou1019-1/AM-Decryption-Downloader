@@ -1,0 +1,54 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install deps
+        run: npm install
+
+      - name: Download ffmpeg (BtbN release build)
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ff
+          Copy-Item (Get-ChildItem ff -Recurse -Filter ffmpeg.exe)[0].FullName ffmpeg.exe
+
+      - name: Build installer
+        run: npx electron-builder --win --x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package bundle (installer + wrapper-lite + docs)
+        shell: pwsh
+        run: |
+          # wrapper-lite 官方包（本仓库 release 内托管的原版 zip，保持与上游一致）
+          gh release download wrapper-lite-bundle -p 'wrapper-lite-qemu-windows.zip' -D wl --clobber
+          Expand-Archive wl\wrapper-lite-qemu-windows.zip -DestinationPath 'bundle\wrapper-lite'
+          # 精简 QEMU 无用文档（data.img 必须保留：它是虚拟机启动盘，官方包内为出厂空镜像）
+          Remove-Item 'bundle\wrapper-lite\qemu\bin\doc','bundle\wrapper-lite\qemu\bin\icons' -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item packaging\* bundle\ -Recurse -Force
+          Copy-Item 'dist-installer\章鱼AM解密工具-章鱼科技版-Setup.exe' bundle\
+          Compress-Archive bundle "dist-installer\章鱼AM解密工具-整合包.zip" -CompressionLevel Optimal
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-installer/章鱼AM解密工具-章鱼科技版-Setup.exe
+            dist-installer/章鱼AM解密工具-整合包.zip
+          generate_release_notes: true

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://*.mzstatic.com data:; style-src 'self' 'unsafe-inline'">
+<title>章鱼AM解密工具-章鱼科技版</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img src="../icon.png" class="logo" alt="">
+    <span class="title">章鱼AM解密工具</span>
+    <span class="badge">章鱼科技版</span>
+  </div>
+  <div class="header-actions">
+    <button id="btn-open-dir" class="icon-btn" title="打开下载目录">📁</button>
+    <button id="btn-settings" class="icon-btn" title="设置">⚙️</button>
+  </div>
+</header>
+
+<section class="search-bar">
+  <input id="input-link" type="text" placeholder="粘贴 Apple Music 歌曲 / 专辑 / 歌单链接，或直接输入 adamId"
+         spellcheck="false">
+  <button id="btn-parse" class="primary">解析</button>
+</section>
+
+<main>
+  <!-- 解析结果 -->
+  <section id="result" class="hidden">
+    <div class="info-card">
+      <img id="result-cover" class="cover" alt="">
+      <div class="info-main">
+        <div class="info-title-row">
+          <span id="result-title" class="result-title"></span>
+          <span id="result-badges" class="badges"></span>
+        </div>
+        <div id="result-sub" class="result-sub"></div>
+        <div id="meta-grid" class="meta-grid"></div>
+        <div class="codec-row">
+          <span class="label">编码</span>
+          <div id="codec-chips" class="chips"></div>
+        </div>
+      </div>
+      <div class="result-actions">
+        <button id="btn-download" class="primary">下载选中</button>
+      </div>
+    </div>
+    <table class="track-table">
+      <thead>
+        <tr>
+          <th class="col-check"><input type="checkbox" id="check-all" checked></th>
+          <th class="col-num">#</th>
+          <th>标题</th>
+          <th>艺术家</th>
+          <th class="col-dur">时长</th>
+        </tr>
+      </thead>
+      <tbody id="track-list"></tbody>
+    </table>
+  </section>
+
+  <!-- 空状态 -->
+  <section id="empty" class="empty">
+    <div class="empty-icon">🎵</div>
+    <div>粘贴链接开始下载无损音乐</div>
+    <div class="empty-hint">支持 ALAC 无损 / AAC / 杜比全景声 · 自动嵌入标签封面歌词</div>
+  </section>
+
+  <!-- 下载队列 -->
+  <section id="queue-section" class="hidden">
+    <div class="section-title">下载队列</div>
+    <div id="queue-list"></div>
+  </section>
+</main>
+
+<!-- 设置弹窗 -->
+<div id="settings-modal" class="modal-mask hidden">
+  <div class="modal">
+    <div class="modal-title">设置</div>
+    <div class="form-row">
+      <label>下载保存位置</label>
+      <div class="dir-row">
+        <input id="set-dir" type="text" readonly>
+        <button id="btn-pick-dir">浏览…</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>默认编码</label>
+      <select id="set-codec">
+        <option value="alac">ALAC 无损</option>
+        <option value="aac">AAC 256K</option>
+        <option value="he-aac">HE-AAC 64K</option>
+        <option value="atmos">杜比全景声 (EC-3)</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>同时下载数</label>
+      <input id="set-concurrency" type="number" min="1" max="8">
+    </div>
+    <div class="form-row">
+      <label>封面尺寸 (px)</label>
+      <input id="set-cover-size" type="number" min="100" max="3000" step="100">
+    </div>
+    <div class="form-row">
+      <label>封面格式</label>
+      <select id="set-cover-format">
+        <option value="jpeg">JPEG（体积小）</option>
+        <option value="png">PNG（无损）</option>
+        <option value="original">原始分辨率</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>歌词语言</label>
+      <input id="set-lyric-lang" type="text" placeholder="en / zh-Hans / ja …">
+    </div>
+    <div class="form-row">
+      <label>歌词保存格式</label>
+      <select id="set-lyric-format">
+        <option value="lrc">.lrc（通用）</option>
+        <option value="ttml">.ttml（原始，含逐词时间轴）</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>嵌入标签字段</label>
+      <div class="field-grid" id="embed-fields">
+        <label><input type="checkbox" value="title"> 标题</label>
+        <label><input type="checkbox" value="artist"> 艺术家</label>
+        <label><input type="checkbox" value="album"> 专辑</label>
+        <label><input type="checkbox" value="albumArtist"> 专辑艺术家</label>
+        <label><input type="checkbox" value="composer"> 作曲家</label>
+        <label><input type="checkbox" value="genre"> 流派</label>
+        <label><input type="checkbox" value="year"> 年份</label>
+        <label><input type="checkbox" value="trackNumber"> 曲目号</label>
+        <label><input type="checkbox" value="discNumber"> 碟号</label>
+        <label><input type="checkbox" value="lyrics"> 歌词</label>
+        <label><input type="checkbox" value="cover"> 封面</label>
+        <label><input type="checkbox" value="isrc"> ISRC</label>
+        <label><input type="checkbox" value="copyright"> 版权</label>
+        <label><input type="checkbox" value="recordLabel"> 厂牌</label>
+        <label><input type="checkbox" value="upc"> UPC</label>
+        <label><input type="checkbox" value="rating"> 分级</label>
+        <label><input type="checkbox" value="songId"> 歌曲ID</label>
+        <label><input type="checkbox" value="albumId"> 专辑ID</label>
+        <label><input type="checkbox" value="artistId"> 艺术家ID</label>
+      </div>
+    </div>
+    <div class="form-row check-row">
+      <label><input type="checkbox" id="set-sort-order"> 写入排序字段（sonm/soar/soal…）</label>
+    </div>
+    <div class="form-row">
+      <label>单曲文件名模板</label>
+      <input id="set-template" type="text">
+      <div class="hint">可用变量：{title} {artist} {album} {track} {disc} {year} {codec}；{track:02d} 补零</div>
+    </div>
+    <div class="form-row check-row">
+      <label><input type="checkbox" id="set-save-lrc"> 保存歌词 .lrc</label>
+      <label><input type="checkbox" id="set-lyrics-translation"> 歌词附加：翻译</label>
+      <label><input type="checkbox" id="set-lyrics-pronunciation"> 歌词附加：发音</label>
+      <label><input type="checkbox" id="set-save-cover"> 专辑保存封面文件</label>
+      <label><input type="checkbox" id="set-album-subfolder"> 专辑存到子文件夹</label>
+      <label><input type="checkbox" id="set-convert-flac"> ALAC 下载后同时转为 FLAC（无损互转）</label>
+      <label><input type="checkbox" id="set-keep-m4a"> 转 FLAC 后保留 m4a</label>
+      <label><input type="checkbox" id="set-alac-fix"> ALAC 修复（Apple END-tag 缺陷）</label>
+    </div>
+    <div class="form-row">
+      <label>密钥服务地址</label>
+      <input id="set-wrapper-url" type="text" placeholder="https://wm.wol.moe">
+      <label>API Key</label>
+      <input id="set-api-key" type="text" placeholder="必填：Telegram @wm_auth_bot 发 /newkey 获取">
+    </div>
+    <div class="form-row">
+      <div class="hint">上游 wm.wol.moe 已启用 API Key 鉴权：在 Telegram 找 @wm_auth_bot 发送 /newkey 免费领取，粘贴到上面即可。密钥服务地址一般不用改，自建 wrapper-lite 时才需要替换。</div>
+    </div>
+    <div class="modal-actions">
+      <button id="btn-settings-close" class="primary">完成</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="ui.js"></script>
+</body>
+</html>

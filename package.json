@@ -1,0 +1,43 @@
+{
+  "name": "zy-am-downloader",
+  "version": "1.2.0",
+  "description": "章鱼AM解密工具-章鱼科技版",
+  "main": "main.js",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "moe.wol.zyamd.self",
+    "productName": "章鱼AM解密工具",
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "downloader.js",
+      "mp4tag.js",
+      "remux.js",
+      "alacfix.js",
+      "renderer/**",
+      "temari.wasm",
+      "icon.ico",
+      "icon.png"
+    ],
+    "extraResources": [
+      { "from": "ffmpeg.exe", "to": "ffmpeg.exe" }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "章鱼AM解密工具",
+      "artifactName": "章鱼AM解密工具-章鱼科技版-Setup.exe"
+    }
+  }
+}

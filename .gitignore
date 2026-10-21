@@ -1,0 +1,6 @@
+node_modules/
+dist-installer/
+ffmpeg.exe
+*.log
+.DS_Store
+Thumbs.db

@@ -13,8 +13,8 @@
 const http = require('node:http');
 const dl = require('./downloader.js');
 
-const P1_CODECS = ['aac']; // P1 只放 AAC（缓冲式全量内存，AAC ≈8MB 无压力；无损档待 P2 流式）
-const MAX_CACHE = 2;       // 内存缓存最近播放的曲目（seek/重复播放不重下）
+const P1_CODECS = ['aac', 'alac']; // aac 缓冲式（P1）；alac 流式（P2）
+const MAX_CACHE = 2;       // 内存缓存最近播放的 AAC 曲目（seek/重复播放不重下）
 
 async function createAmService(opts = {}) {
   const { wasmPath, wrapperUrl, apiKey, fetchImpl } = opts;
@@ -27,6 +27,7 @@ async function createAmService(opts = {}) {
 
   const cache = new Map(); // `${adamId}:${codec}` -> { buf, time }
   const inflight = new Map(); // 同曲并发请求合并
+  const activeStreams = new Map(); // adamId -> { cancelled }（ALAC 流式）
 
   async function getTrackBuffer(adamId, codec) {
     const key = `${adamId}:${codec}`;
@@ -75,7 +76,40 @@ async function createAmService(opts = {}) {
     const codec = u.searchParams.get('codec') || 'aac';
     if (!P1_CODECS.includes(codec)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `P1 阶段在线播放仅支持 AAC（codec=aac）；${codec} 无损档待 P2 流式上线` }));
+      res.end(JSON.stringify({ error: `不支持的 codec=${codec}（在线播放支持：${P1_CODECS.join('/')}）` }));
+      return;
+    }
+
+    // ---- ALAC 流式（P2）：边下边解密边写响应，无 Content-Length ----
+    if (codec === 'alac') {
+      // 同 adamId 已有流在跑 → 中止旧流（seek 场景：安妮侧重拿新 URL）
+      const old = activeStreams.get(adamId);
+      if (old) old.cancelled = true;
+      const state = { cancelled: false };
+      activeStreams.set(adamId, state);
+      res.on('close', () => { state.cancelled = true; });
+      try {
+        res.writeHead(200, {
+          'Content-Type': 'audio/mp4',
+          'Cache-Control': 'no-store',
+        });
+        const gen = dl.streamTrack(
+          { adamId },
+          { codec: 'alac', wasmPath, startSec: +(u.searchParams.get('t') || 0) });
+        for await (const chunk of gen) {
+          if (state.cancelled) break;
+          if (!res.write(chunk)) await new Promise(r => res.once('drain', r));
+        }
+        await gen.return?.();
+      } catch (e) {
+        if (!state.cancelled && !res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+        }
+        if (!state.cancelled) console.error('[am-service] stream error:', e.message);
+      } finally {
+        if (activeStreams.get(adamId) === state) activeStreams.delete(adamId);
+        if (!res.writableEnded) res.end();
+      }
       return;
     }
 

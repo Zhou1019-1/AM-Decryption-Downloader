@@ -95,13 +95,13 @@ async function api(base, pathname, params = {}, retries = 3) {
   throw lastErr;
 }
 
-async function fetchBytes(url, range) {
+async function fetchBytes(url, range, signal) {
   const headers = {};
   if (range) {
     const [len, off] = range.split('@').map(Number);
     headers.Range = `bytes=${off}-${off + len - 1}`;
   }
-  const r = await http(url, { headers });
+  const r = await http(url, { headers, signal });
   if (!r.ok) throw new Error(`分片 HTTP ${r.status}`);
   return Buffer.from(await r.arrayBuffer());
 }
@@ -252,7 +252,7 @@ function parseAttrs(line) {
 
 function parseMediaPlaylist(text, baseUrl) {
   const keyUris = [];
-  let curKey = null, map = null, pendingRange = null;
+  let curKey = null, map = null, pendingRange = null, pendingDur = 0;
   const segs = [];
   for (const line of text.split(/\r?\n/)) {
     if (line.startsWith('#EXT-X-KEY:')) {
@@ -261,11 +261,13 @@ function parseMediaPlaylist(text, baseUrl) {
     } else if (line.startsWith('#EXT-X-MAP:')) {
       const a = parseAttrs(line.slice(11));
       map = { url: new URL(a.URI, baseUrl).href, range: a.BYTERANGE || null };
+    } else if (line.startsWith('#EXTINF:')) {
+      pendingDur = parseFloat(line.slice(8)) || 0;
     } else if (line.startsWith('#EXT-X-BYTERANGE:')) {
       pendingRange = line.slice(17).trim();
     } else if (line && !line.startsWith('#')) {
-      segs.push({ url: new URL(line.trim(), baseUrl).href, range: pendingRange, key: curKey });
-      pendingRange = null;
+      segs.push({ url: new URL(line.trim(), baseUrl).href, range: pendingRange, key: curKey, dur: pendingDur });
+      pendingRange = null; pendingDur = 0;
     }
   }
   return { keyUris, map, segs };
@@ -339,7 +341,135 @@ function findEncryptedSamples(buf) {
   return out;
 }
 
-// ---------- Temari WASM ----------
+// ---------- 流式播放（P2） ----------
+// /m3u8 短缓存（5 分钟）：wrapper VM 上游协商约 2.5s，是冷启动最大头；
+// 重播/seek 同曲时跳过。URL 带时效签名，TTL 不宜长。
+const m3u8Cache = new Map(); // adamId -> { url, at }
+async function getMasterUrl(adamId) {
+  const hit = m3u8Cache.get(adamId);
+  if (hit && Date.now() - hit.at < 300e3) return hit.url;
+  const { m3u8 } = await api(CONFIG.wrapperUrl, '/m3u8', { adamId });
+  m3u8Cache.set(adamId, { url: m3u8, at: Date.now() });
+  return m3u8;
+}
+
+// 等长净化：加密标记盒类型原地改写为 free（字节长度/偏移不变，am-hook 同款手法）
+function setBoxType(buf, pos, type) { buf.write(type, pos + 4, 4, 'latin1'); }
+
+// init 段净化：enca → 原始编码 fourcc；sinf/pssh → free
+function sanitizeInit(buf, codecKey) {
+  const fourcc = codecKey === 'atmos' ? 'ec-3' : codecKey === 'alac' ? 'alac' : 'mp4a';
+  const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'udta']);
+  const walk = (s, e) => {
+    for (const b of boxes(buf, s, e)) {
+      if (b.type === 'pssh') { setBoxType(buf, b.start, 'free'); continue; }
+      if (b.type === 'stsd') {
+        // stsd：8 字节头 + 8 字节 version/flags+count，然后各 sample entry
+        let q = b.payload + 8;
+        while (q + 8 <= b.start + b.size) {
+          const esize = buf.readUInt32BE(q);
+          if (esize < 36 || q + esize > b.start + b.size) break;
+          const etype = buf.toString('latin1', q + 4, q + 8);
+          if (etype === 'enca') {
+            setBoxType(buf, q, fourcc);
+            // 音频 sample entry：盒头 8 + 固定头 28，之后是嵌套盒（esds/alac 配置 + sinf）
+            for (const c of boxes(buf, q + 36, q + esize)) {
+              if (c.type === 'sinf') setBoxType(buf, c.start, 'free');
+            }
+          }
+          q += esize;
+        }
+        continue;
+      }
+      if (CONTAINERS.has(b.type)) walk(b.payload, b.start + b.size);
+    }
+  };
+  walk(0, buf.length);
+}
+
+// 分片净化：moof/traf 内的 senc/saiz/saio → free
+function sanitizeFragment(buf) {
+  for (const b of boxes(buf, 0, buf.length)) {
+    if (b.type !== 'moof') continue;
+    for (const tr of boxes(buf, b.payload, b.start + b.size)) {
+      if (tr.type !== 'traf') continue;
+      for (const c of boxes(buf, tr.payload, tr.start + tr.size)) {
+        if (c.type === 'senc' || c.type === 'saiz' || c.type === 'saio') setBoxType(buf, c.start, 'free');
+      }
+    }
+  }
+}
+
+// 流式下载解密：按时间轴顺序产出解密后的字节（init 段 + 各分片）
+// opts: { codec='alac', wasmPath, concurrency=4, startSec=0, signal }
+// - 分片级并发拉取 + 按序交付（预取窗口=concurrency，天然背压，内存上限≈concurrency×分片大小）
+// - 客户端中止：opts.signal abort 或 break for-await（生成器 return）→ 停止拉取
+async function* streamTrack(track, opts = {}) {
+  const { codec = 'alac', wasmPath, concurrency = 4, startSec = 0, signal } = opts;
+  const masterUrl = await getMasterUrl(track.adamId);
+  const master = await (await http(masterUrl)).text();
+  const variant = pickVariant(master, codec);
+  const mediaUrl = new URL(variant.uri, masterUrl).href;
+  const media = await (await http(mediaUrl)).text();
+  const { keyUris, map, segs } = parseMediaPlaylist(media, mediaUrl);
+  const temari = await loadTemari(wasmPath);
+
+  // 冷启动优化：init 拉取与密钥模板请求并行；/key 网络并行、wasm fromJson 串行（bump 区共享）
+  const initP = map ? fetchBytes(map.url, map.range, signal) : null;
+  const tplJsons = await Promise.all(keyUris.map(uri => {
+    const id = uri.includes('/P000000000/') ? '0' : track.adamId;
+    return api(CONFIG.wrapperUrl, '/key', { adamId: id, uri });
+  }));
+  const handles = new Map();
+  keyUris.forEach((uri, i) => {
+    const ck = uri === ASSET_KEY_URI ? ASSET_KEY_URI : `${track.adamId}${uri}`;
+    let h = templateCache.get(ck);
+    if (!h) { h = temari.fromJson(JSON.stringify(tplJsons[i])); templateCache.set(ck, h); }
+    handles.set(uri, h);
+  });
+
+  // seek：按 EXTINF 累计时长定位起始分片
+  let startIdx = 0;
+  if (startSec > 0) {
+    let acc = 0;
+    while (startIdx < segs.length - 1 && acc + (segs[startIdx].dur || 0) < startSec) {
+      acc += segs[startIdx].dur || 0;
+      startIdx++;
+    }
+  }
+
+  if (initP) {
+    const init = await initP;
+    sanitizeInit(init, codec);
+    yield init;
+  }
+
+  let next = startIdx;
+  const pending = new Map();
+  const launch = (i) => pending.set(i, (async () => {
+    const seg = segs[i];
+    const frag = await fetchBytes(seg.url, seg.range, signal);
+    const h = handles.get(seg.key ?? keyUris[0]);
+    if (h) {
+      for (const s of findEncryptedSamples(frag)) {
+        const plain = temari.decrypt(h, frag.subarray(s.offset, s.offset + s.length));
+        if (plain) frag.set(plain, s.offset);
+      }
+    }
+    sanitizeFragment(frag);
+    return frag;
+  })());
+  for (let k = 0; k < concurrency && next < segs.length; k++) launch(next++);
+  for (let i = startIdx; i < segs.length; i++) {
+    if (signal && signal.aborted) return;
+    const frag = await pending.get(i);
+    pending.delete(i);
+    if (next < segs.length) launch(next++);
+    yield frag;
+  }
+}
+
+
 let temariInst = null;
 async function loadTemari(wasmPath) {
   if (temariInst) return temariInst;
@@ -643,4 +773,4 @@ async function downloadTrack(track, opts, onProgress) {
   return { file: out, cover, lyrics, lyricFormat };
 }
 
-module.exports = { resolve, probeCodecs, downloadTrack, fetchCover, fetchLyrics, fetchLyricsSplit, search, wrapperStatus, CODECS, parseInput, setConfig, ttmlToLrc };
+module.exports = { resolve, probeCodecs, downloadTrack, streamTrack, fetchCover, fetchLyrics, fetchLyricsSplit, search, wrapperStatus, CODECS, parseInput, setConfig, ttmlToLrc };

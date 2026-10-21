@@ -49,7 +49,9 @@ jobs:
           Remove-Item 'bundle\wrapper-lite\qemu\bin\doc','bundle\wrapper-lite\qemu\bin\icons' -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item packaging\* bundle\ -Recurse -Force
           Copy-Item 'dist-installer\章鱼AM解密工具-章鱼科技版-Setup.exe' bundle\
-          Compress-Archive bundle "dist-installer\章鱼AM解密工具-整合包.zip" -CompressionLevel Optimal
+          Compress-Archive bundle 'dist-installer\ZyAM-Bundle.zip' -CompressionLevel Optimal
+          # release 资产名用 ASCII（中文名上传会被剥字符）
+          Copy-Item 'dist-installer\章鱼AM解密工具-章鱼科技版-Setup.exe' 'dist-installer\ZyAM-Setup.exe'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,6 +60,6 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            dist-installer/章鱼AM解密工具-章鱼科技版-Setup.exe
-            dist-installer/章鱼AM解密工具-整合包.zip
+            dist-installer/ZyAM-Setup.exe
+            dist-installer/ZyAM-Bundle.zip
           generate_release_notes: true
